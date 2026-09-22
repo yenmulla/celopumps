@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Next.js build output
+.next/
+frontend/.next/
+out/
+frontend/out/
+
+# Hardhat / Smart contract build output
+artifacts/
+cache/
+typechain-types/
+
+# IDE / Editor
+.idea/
+.vscode/
+
+# Environment variables
+.env
+.env.local
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+.vercel

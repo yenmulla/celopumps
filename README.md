@@ -1,4 +1,4 @@
-# Launchpad 🚀
+# Launchpad 
 
 A decentralized, fair-launch token launchpad powered by bonding curves on **Celo**, **Optimism**, and **Arbitrum**. Launchpad allows anyone to deploy customizable ERC-20 tokens instantly with zero creation fees, built-in creator tax options, and automatic liquidity graduation.
 

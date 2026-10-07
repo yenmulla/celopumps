@@ -1,11 +1,9 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { useAccount, useWriteContract, useWaitForTransactionReceipt, useChainId } from 'wagmi';
-import { parseEther } from 'viem';
-import { LAUNCHPAD_FACTORY_ABI, getLaunchpadFactoryAddress } from '@/contracts';
-
-import { useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useAccount, useWriteContract, useReadContract, useWaitForTransactionReceipt, useChainId } from 'wagmi';
+import { parseEther, formatEther } from 'viem';
+import { LAUNCH_FACTORY_ABI, getLaunchFactoryAddress, getQuoteAddress } from '@/contracts';
 
 import {
   Rocket,
@@ -31,13 +29,22 @@ export default function LaunchPage() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const chainId = useChainId();
 
+  const factoryAddress = useMemo(() => getLaunchFactoryAddress(chainId), [chainId]);
+
+  const { data: creationFeeData } = useReadContract({
+    address: factoryAddress,
+    abi: LAUNCH_FACTORY_ABI,
+    functionName: 'creationFee',
+  });
+
+  const creationFee = creationFeeData ? BigInt(creationFeeData.toString()) : 0n;
+
   const nativeSymbol = useMemo(() => {
-    if (chainId === 10 || chainId === 42161) return 'ETH';
+    if (chainId === 10 || chainId === 42161 || chainId === 11155111) return 'ETH';
     return 'CELO';
   }, [chainId]);
 
   const [formData, setFormData] = useState({
-
     name: '',
     symbol: '',
     description: '',
@@ -47,10 +54,8 @@ export default function LaunchPage() {
     initialBuy: '',
     holderFeeSharing: false,
     creatorWallet: '',
-    creatorTax: '0',
+    creatorTax: '1',
   });
-
-  const CREATION_FEE = '0';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,41 +64,68 @@ export default function LaunchPage() {
       return;
     }
 
-    const value = parseEther(CREATION_FEE) + parseEther(formData.initialBuy || '0');
-    const factoryAddress = getLaunchpadFactoryAddress(chainId);
+    const quoteAddress = getQuoteAddress(chainId);
 
-    writeContract({
-      address: factoryAddress,
-      abi: LAUNCHPAD_FACTORY_ABI,
-      functionName: 'createToken',
+    const metadataObj = {
+      description: formData.description,
+      imageUrl: formData.imageUrl,
+      twitter: formData.twitter,
+      telegram: formData.telegram,
+      creatorWallet: formData.creatorWallet || address,
+    };
 
-      args: [
-        formData.name,
-        formData.symbol,
-        formData.description,
-        formData.twitter,
-        formData.telegram,
-        formData.imageUrl,
-        BigInt(Math.floor(parseFloat(formData.creatorTax) * 100)), // Convert to BPS
-        (formData.creatorWallet as `0x${string}`) || (address as `0x${string}`),
-        formData.holderFeeSharing
-      ],
-      value: value
-    });
+    const metadataUri = JSON.stringify(metadataObj);
+
+    // Fee in parts per million (e.g. 1% = 10,000 ppm, 10% = 100,000 ppm, min: 0, max: 100,000)
+    const rawTaxPercent = parseFloat(formData.creatorTax || '1');
+    const feePpm = Math.max(0, Math.min(100000, Math.floor(rawTaxPercent * 10000)));
+
+    const launchParams = {
+      name: formData.name,
+      symbol: formData.symbol,
+      metadataUri: metadataUri,
+      quote: quoteAddress,
+      quoteUsdPrice: parseEther('3000'), // $3,000 quote asset price
+      priceDeadline: BigInt(Math.floor(Date.now() / 1000) + 86400 * 365),
+      priceSignature: '0x' as `0x${string}`,
+      feePpm: feePpm,
+      feesToHolders: formData.holderFeeSharing,
+    };
+
+    const initialBuyEther = parseEther(formData.initialBuy || '0');
+
+    if (initialBuyEther > 0n) {
+      const totalValue = creationFee + initialBuyEther;
+      writeContract({
+        address: factoryAddress,
+        abi: LAUNCH_FACTORY_ABI,
+        functionName: 'createLaunchAndBuy',
+        args: [launchParams, 0n],
+        value: totalValue,
+      });
+    } else {
+      writeContract({
+        address: factoryAddress,
+        abi: LAUNCH_FACTORY_ABI,
+        functionName: 'createLaunch',
+        args: [launchParams],
+        value: creationFee,
+      });
+    }
   };
 
   useEffect(() => {
     if (isSuccess) {
       setFormData({
         name: '', symbol: '', description: '', twitter: '', telegram: '', imageUrl: '',
-        initialBuy: '', holderFeeSharing: false, creatorWallet: '', creatorTax: '0'
+        initialBuy: '', holderFeeSharing: false, creatorWallet: '', creatorTax: '1'
       });
     }
   }, [isSuccess]);
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      {/* Performance Warning Banner */}
+      {/* Error Alert */}
       {error && (
         <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 flex items-center gap-3 text-red-200 text-xs">
           <AlertCircle className="h-4 w-4 shrink-0" />
@@ -101,14 +133,15 @@ export default function LaunchPage() {
         </div>
       )}
 
-      {/* Navigation & Version Toggle */}
+      {/* Navigation */}
       <div className="flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors text-sm font-medium">
           <ArrowLeft className="h-4 w-4" /> Back
         </Link>
         <div className="flex bg-zinc-900 rounded-lg p-1 border border-zinc-800">
-          <button className="px-3 py-1 text-xs font-bold rounded-md bg-zinc-800 text-white">v2</button>
-          <button className="px-3 py-1 text-xs font-bold rounded-md text-zinc-500 hover:text-zinc-300">v1</button>
+          <button className="px-3 py-1 text-xs font-bold rounded-md bg-zinc-800 text-white">
+            {chainId === 1 ? 'Ethereum Mainnet' : 'Uniswap v4'}
+          </button>
         </div>
       </div>
 
@@ -126,7 +159,7 @@ export default function LaunchPage() {
           <div className="space-y-2">
             <h2 className="text-2xl font-bold text-white">Token Successfully Created!</h2>
             <p className="text-zinc-400 text-sm">
-              Your token is now deployed live on the bonding curve.
+              Your token is now deployed live on the Uniswap v4 launch hook.
             </p>
             {hash && (
               <p className="text-[10px] text-zinc-500 font-mono">Tx: {hash}</p>
@@ -241,9 +274,8 @@ export default function LaunchPage() {
                   <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-zinc-400">
                     {nativeSymbol}
                   </span>
-
                 </div>
-                <p className="text-[10px] text-zinc-500 font-medium">Be the first entry on the bonding curve.</p>
+                <p className="text-[10px] text-zinc-500 font-medium">Initial dev buy upon token creation.</p>
               </div>
 
               {/* Advanced Settings */}
@@ -262,7 +294,7 @@ export default function LaunchPage() {
                     <div className="flex items-center justify-between p-4 bg-background rounded-xl border border-zinc-800">
                       <div>
                         <p className="text-xs font-bold text-white">Holder fee sharing</p>
-                        <p className="text-[10px] text-zinc-500">Route creator fees to holders instead of a wallet.</p>
+                        <p className="text-[10px] text-zinc-500">Route trading fees to token holders.</p>
                       </div>
                       <button
                         type="button"
@@ -275,7 +307,7 @@ export default function LaunchPage() {
 
                     {!formData.holderFeeSharing && (
                       <div className="space-y-2">
-                        <label className="text-xs font-bold text-zinc-400 uppercase tracking-widest block">Creator Wallet</label>
+                        <label className="text-xs font-bold text-zinc-400 uppercase tracking-widest block">Creator Fee Wallet</label>
                         <input
                           type="text"
                           placeholder={address || "Connect wallet to see address"}
@@ -283,13 +315,12 @@ export default function LaunchPage() {
                           onChange={(e) => setFormData({ ...formData, creatorWallet: e.target.value })}
                           className="w-full bg-background border border-zinc-800 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-primary transition-all placeholder:text-zinc-600"
                         />
-                        <p className="text-[10px] text-zinc-500">Address to receive the creator tax on trades.</p>
                       </div>
                     )}
 
                     <div className="space-y-2">
                       <div className="flex justify-between">
-                        <label className="text-xs font-bold text-zinc-400 uppercase tracking-widest block">Creator Tax %</label>
+                        <label className="text-xs font-bold text-zinc-400 uppercase tracking-widest block">Fee (PPM %)</label>
                         <span className="text-xs font-bold text-primary">{formData.creatorTax}%</span>
                       </div>
                       <input
@@ -303,7 +334,7 @@ export default function LaunchPage() {
                       />
                       <div className="flex justify-between text-[10px] text-zinc-600 font-bold px-1">
                         <span>0%</span>
-                        <span>10%</span>
+                        <span>10% (100,000 PPM)</span>
                       </div>
                     </div>
                   </div>
@@ -322,8 +353,10 @@ export default function LaunchPage() {
 
               <div className="space-y-4 pt-4 border-t border-zinc-900">
                 <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold text-zinc-400 uppercase">Launch Fee</span>
-                  <span className="text-sm font-bold text-primary">FREE</span>
+                  <span className="text-xs font-bold text-zinc-400 uppercase">Creation Fee</span>
+                  <span className="text-sm font-bold text-primary">
+                    {creationFee === 0n ? "FREE" : `${formatEther(creationFee)} ${nativeSymbol}`}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-xs font-bold text-zinc-400 uppercase">Pairing</span>
@@ -331,8 +364,10 @@ export default function LaunchPage() {
                 </div>
 
                 <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold text-zinc-400 uppercase">Liquidity</span>
-                  <span className="text-sm font-bold text-primary">Locked</span>
+                  <span className="text-xs font-bold text-zinc-400 uppercase">Hook Pool</span>
+                  <span className="text-sm font-bold text-primary">
+                    {chainId === 1 ? 'Uniswap V3 Mainnet' : 'Uniswap v4'}
+                  </span>
                 </div>
               </div>
 
@@ -340,9 +375,8 @@ export default function LaunchPage() {
                 <div className="flex gap-2">
                   <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
                   <p className="text-[10px] text-zinc-400 leading-relaxed">
-                    Once market cap reaches <span className="text-white font-bold">2,000 {nativeSymbol}</span>, all liquidity migrates to automated DEX and LP is burned.
+                    Token will be launched with a custom Uniswap v4 Hook liquidity pool with dynamic fee distribution.
                   </p>
-
                 </div>
               </div>
 
@@ -368,7 +402,7 @@ export default function LaunchPage() {
 
             <div className="px-4 text-[10px] text-zinc-600 font-medium leading-relaxed space-y-2">
               <p>By creating a token, you agree to the Terms of Service. Launching is irreversible.</p>
-              <p>Fair Launch Protocol v2.0</p>
+              <p>Stockpad Launch Factory v4</p>
             </div>
           </div>
         </div>
@@ -376,4 +410,3 @@ export default function LaunchPage() {
     </div>
   );
 }
-

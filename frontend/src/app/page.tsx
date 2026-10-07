@@ -4,10 +4,9 @@ import React, { useState, useMemo } from 'react';
 import Link from 'next/link';
 import { useReadContract, useReadContracts } from 'wagmi';
 import { formatEther } from 'viem';
-import { LAUNCHPAD_FACTORY_ABI, getLaunchpadFactoryAddress } from '@/contracts';
+import { LAUNCH_FACTORY_ABI, LAUNCH_TOKEN_ABI, getLaunchFactoryAddress } from '@/contracts';
 import { useChainId } from 'wagmi';
-import { Search, Flame, TrendingUp, Sparkles, AlertCircle, ArrowUpRight } from 'lucide-react';
-
+import { Search, Flame, TrendingUp, Sparkles, AlertCircle, ArrowUpRight, CheckCircle2 } from 'lucide-react';
 
 interface TokenItem {
   id: string;
@@ -17,6 +16,7 @@ interface TokenItem {
   creator: string;
   virtualMarketCap: number;
   bondingCurveProgress: number;
+  isGraduated: boolean;
   replies: number;
   logoUrl?: string;
   timestamp: string;
@@ -26,77 +26,125 @@ export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'progress' | 'marketCap' | 'newest'>('progress');
   const chainId = useChainId();
-  const factoryAddress = useMemo(() => getLaunchpadFactoryAddress(chainId), [chainId]);
+  const factoryAddress = useMemo(() => getLaunchFactoryAddress(chainId), [chainId]);
 
   const { nativeSymbol, dexName } = useMemo(() => {
-    if (chainId === 10 || chainId === 42161) return { nativeSymbol: 'ETH', dexName: 'Uniswap' };
-    return { nativeSymbol: 'CELO', dexName: 'Ubeswap' };
+    if (chainId === 1) return { nativeSymbol: 'ETH', dexName: 'Uniswap V3 Mainnet' };
+    if (chainId === 10 || chainId === 42161 || chainId === 11155111) return { nativeSymbol: 'ETH', dexName: 'Uniswap' };
+    return { nativeSymbol: 'CELO', dexName: 'Uniswap' };
   }, [chainId]);
 
-
-  // Fetch all token addresses
-  const { data: allTokenAddresses } = useReadContract({
+  // Read graduation threshold from LaunchFactory
+  const { data: thresholdData } = useReadContract({
     address: factoryAddress,
-    abi: LAUNCHPAD_FACTORY_ABI,
-    functionName: 'getTokens',
+    abi: LAUNCH_FACTORY_ABI,
+    functionName: 'graduationThreshold',
   });
 
-  // Fetch threshold
-  const { data: threshold } = useReadContract({
+  const graduationThresholdEth = thresholdData
+    ? parseFloat(formatEther(thresholdData as bigint))
+    : (chainId === 1 ? 2.0 : 0.2);
+
+  // Fetch total launch count from LaunchFactory
+  const { data: launchCountData } = useReadContract({
     address: factoryAddress,
-    abi: LAUNCHPAD_FACTORY_ABI,
-    functionName: 'GRADUATION_THRESHOLD',
+    abi: LAUNCH_FACTORY_ABI,
+    functionName: 'launchCount',
   });
 
-  // Prepare calls for details
-  const detailCalls = useMemo(() => {
-    if (!allTokenAddresses) return [];
-    return allTokenAddresses.map((addr) => ({
+  const count = launchCountData ? Number(launchCountData) : 0;
+
+  // Prepare contract calls to get launch addresses
+  const launchCalls = useMemo(() => {
+    return Array.from({ length: count }, (_, i) => ({
       address: factoryAddress,
-      abi: LAUNCHPAD_FACTORY_ABI,
-      functionName: 'tokens',
-      args: [addr],
+      abi: LAUNCH_FACTORY_ABI,
+      functionName: 'allLaunches',
+      args: [BigInt(i)],
     }));
-  }, [allTokenAddresses, factoryAddress]);
+  }, [count, factoryAddress]);
 
+  const { data: launchAddressResults } = useReadContracts({
+    contracts: launchCalls,
+  });
 
-  const { data: tokenDetails, isLoading } = useReadContracts({
-    contracts: detailCalls,
+  const launchAddresses = useMemo(() => {
+    if (!launchAddressResults) return [];
+    return launchAddressResults
+      .filter((r) => r && r.status === 'success' && r.result)
+      .map((r) => r.result as `0x${string}`);
+  }, [launchAddressResults]);
+
+  // Prepare token detail queries for each launched token
+  const tokenCalls = useMemo(() => {
+    const calls: any[] = [];
+    launchAddresses.forEach((addr) => {
+      calls.push({ address: addr, abi: LAUNCH_TOKEN_ABI, functionName: 'name' });
+      calls.push({ address: addr, abi: LAUNCH_TOKEN_ABI, functionName: 'symbol' });
+      calls.push({ address: addr, abi: LAUNCH_TOKEN_ABI, functionName: 'metadataUri' });
+      calls.push({ address: addr, abi: LAUNCH_TOKEN_ABI, functionName: 'creator' });
+      calls.push({ address: factoryAddress, abi: LAUNCH_FACTORY_ABI, functionName: 'realReserves', args: [addr] });
+      calls.push({ address: factoryAddress, abi: LAUNCH_FACTORY_ABI, functionName: 'isGraduated', args: [addr] });
+    });
+    return calls;
+  }, [launchAddresses, factoryAddress]);
+
+  const { data: tokenDataResults, isLoading } = useReadContracts({
+    contracts: tokenCalls,
   });
 
   const tokens = useMemo(() => {
-    if (!tokenDetails || !allTokenAddresses) return [] as TokenItem[];
+    if (!tokenDataResults || launchAddresses.length === 0) return [] as TokenItem[];
 
     const result: TokenItem[] = [];
 
-    tokenDetails.forEach((res, index) => {
-      if (res && res.status === 'success' && res.result) {
-        const data = res.result as any;
-        const addr = allTokenAddresses[index];
+    launchAddresses.forEach((addr, i) => {
+      const baseIdx = i * 6;
+      const nameRes = tokenDataResults[baseIdx];
+      const symbolRes = tokenDataResults[baseIdx + 1];
+      const metadataRes = tokenDataResults[baseIdx + 2];
+      const creatorRes = tokenDataResults[baseIdx + 3];
+      const reservesRes = tokenDataResults[baseIdx + 4];
+      const graduatedRes = tokenDataResults[baseIdx + 5];
 
-        const realCelo = parseFloat(formatEther(data[4] || BigInt(0)));
-        const defaultThreshold = (chainId === 10 || chainId === 42161) ? "1000000000000000000" : "2000000000000000000000";
-        const gradThreshold = parseFloat(formatEther(threshold || BigInt(defaultThreshold)));
+      const name = (nameRes?.status === 'success' && nameRes.result) ? (nameRes.result as string) : 'Token';
+      const symbol = (symbolRes?.status === 'success' && symbolRes.result) ? (symbolRes.result as string) : 'TKN';
+      const rawMetadata = (metadataRes?.status === 'success' && metadataRes.result) ? (metadataRes.result as string) : '';
+      const creatorAddr = (creatorRes?.status === 'success' && creatorRes.result) ? (creatorRes.result as string) : addr;
+      const reservesEth = (reservesRes?.status === 'success' && reservesRes.result) ? parseFloat(formatEther(reservesRes.result as bigint)) : 0;
+      const isGrad = (graduatedRes?.status === 'success' && graduatedRes.result) ? Boolean(graduatedRes.result) : false;
 
-        const progress = Math.min(100, (realCelo / gradThreshold) * 100);
+      const progress = isGrad ? 100 : Math.min(100, (reservesEth / graduationThresholdEth) * 100);
 
-        result.push({
-          id: addr,
-          name: data[10] || 'Unknown',
-          symbol: data[11] || 'TKN',
-          description: data[12] || '',
-          creator: `${data[1].substring(0, 5)}...${data[1].substring(38)}`,
-          virtualMarketCap: realCelo,
-          bondingCurveProgress: progress,
-          replies: 0,
-          logoUrl: data[15] || '',
-          timestamp: 'Just now',
-        });
+      let description = '';
+      let logoUrl = '';
+      if (rawMetadata) {
+        try {
+          const parsed = JSON.parse(rawMetadata);
+          description = parsed.description || rawMetadata;
+          logoUrl = parsed.imageUrl || '';
+        } catch {
+          description = rawMetadata;
+        }
       }
+
+      result.push({
+        id: addr,
+        name,
+        symbol,
+        description,
+        creator: `${creatorAddr.substring(0, 6)}...${creatorAddr.substring(38)}`,
+        virtualMarketCap: reservesEth,
+        bondingCurveProgress: progress,
+        isGraduated: isGrad,
+        replies: 0,
+        logoUrl,
+        timestamp: 'Just now',
+      });
     });
 
     return result;
-  }, [tokenDetails, allTokenAddresses, threshold]);
+  }, [tokenDataResults, launchAddresses, graduationThresholdEth]);
 
   const filteredTokens = useMemo(() => {
     return tokens
@@ -120,11 +168,11 @@ export default function DashboardPage() {
           <div className="absolute top-0 right-0 -mt-4 -mr-4 h-24 w-24 bg-primary/10 rounded-full blur-xl group-hover:bg-primary/20 transition-all" />
           <div className="flex items-center gap-3 mb-2">
             <Flame className="h-5 w-5 text-orange-500" />
-            <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">Active Tokens</h3>
+            <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">Active Launches</h3>
           </div>
           <p className="text-2xl font-bold text-white mb-1">{tokens.length}</p>
           <p className="text-sm text-primary flex items-center gap-1">
-            Live on Bonding Curve <TrendingUp className="h-3.5 w-3.5" />
+            Live on {dexName} <TrendingUp className="h-3.5 w-3.5" />
           </p>
         </div>
 
@@ -132,12 +180,12 @@ export default function DashboardPage() {
           <div className="absolute top-0 right-0 -mt-4 -mr-4 h-24 w-24 bg-secondary/10 rounded-full blur-xl group-hover:bg-secondary/20 transition-all" />
           <div className="flex items-center gap-3 mb-2">
             <Sparkles className="h-5 w-5 text-secondary" />
-            <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">Total Liquidity</h3>
+            <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">Total Reserves</h3>
           </div>
           <p className="text-2xl font-bold text-white mb-1">
-            {tokens.reduce((acc, t) => acc + t.virtualMarketCap, 0).toFixed(2)} {nativeSymbol}
+            {tokens.reduce((acc, t) => acc + t.virtualMarketCap, 0).toFixed(3)} {nativeSymbol}
           </p>
-          <p className="text-sm text-zinc-400">Locked in pools</p>
+          <p className="text-sm text-zinc-400">In Launch Reserve Pools</p>
         </div>
 
         <div className="bg-gradient-to-br from-surface to-zinc-900 border border-zinc-800 p-6 rounded-2xl relative overflow-hidden group">
@@ -146,8 +194,8 @@ export default function DashboardPage() {
             <AlertCircle className="h-5 w-5 text-blue-400" />
             <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">Graduation Target</h3>
           </div>
-          <p className="text-2xl font-bold text-white mb-1">{threshold ? formatEther(threshold) : (chainId === 10 || chainId === 42161 ? '1' : '2000')} {nativeSymbol}</p>
-          <p className="text-sm text-zinc-400">Migrates automatically to {dexName}</p>
+          <p className="text-2xl font-bold text-white mb-1">{graduationThresholdEth.toFixed(2)} {nativeSymbol}</p>
+          <p className="text-sm text-zinc-400">Graduates automatically to Uniswap</p>
         </div>
       </div>
 
@@ -176,7 +224,7 @@ export default function DashboardPage() {
                   : 'bg-background border border-zinc-800 text-zinc-400 hover:text-white'
               }`}
             >
-              {type === 'marketCap' ? 'Virtual Market Cap' : type === 'progress' ? 'Curve Progress' : type}
+              {type === 'marketCap' ? 'Reserves' : type === 'progress' ? 'Graduation' : type}
             </button>
           ))}
         </div>
@@ -185,7 +233,7 @@ export default function DashboardPage() {
       {/* Token Listings Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {isLoading ? (
-           <div className="col-span-full text-center py-12">Loading tokens...</div>
+           <div className="col-span-full text-center py-12">Loading launches...</div>
         ) : filteredTokens.length > 0 ? (
           filteredTokens.map((token) => (
             <div
@@ -224,36 +272,38 @@ export default function DashboardPage() {
 
               <div className="space-y-3 pt-3 border-t border-zinc-900">
                 <div className="flex justify-between items-center text-xs">
-                  <span className="text-zinc-500">Real {nativeSymbol} in Curve:</span>
+                  <span className="text-zinc-500">Real Reserves:</span>
                   <span className="font-bold text-white">{token.virtualMarketCap.toFixed(4)} {nativeSymbol}</span>
                 </div>
 
                 <div>
                   <div className="flex justify-between items-center text-xs mb-1">
-                    <span className="text-zinc-500">Bonding Curve Progress:</span>
-                    <span className="font-semibold text-primary">{token.bondingCurveProgress.toFixed(1)}%</span>
+                    <span className="text-zinc-500">Graduation Progress:</span>
+                    <span className={`font-semibold flex items-center gap-1 ${token.isGraduated ? 'text-secondary' : 'text-primary'}`}>
+                      {token.isGraduated && <CheckCircle2 className="h-3.5 w-3.5" />}
+                      {token.isGraduated ? 'Graduated to Uniswap' : `${token.bondingCurveProgress.toFixed(1)}%`}
+                    </span>
                   </div>
                   <div className="w-full bg-background h-2 rounded-full overflow-hidden border border-zinc-900">
                     <div
-                      className="bg-gradient-to-r from-primary to-secondary h-full rounded-full transition-all duration-500"
+                      className={`h-full rounded-full transition-all duration-500 ${token.isGraduated ? 'bg-secondary' : 'bg-gradient-to-r from-primary to-secondary'}`}
                       style={{ width: `${token.bondingCurveProgress}%` }}
                     />
                   </div>
                 </div>
 
                 <div className="flex justify-between items-center text-xs text-zinc-500">
-                  <span>Comments: {token.replies}</span>
+                  <span>Token: {token.id.substring(0, 6)}...{token.id.substring(38)}</span>
                   <Link href={`/trade/${token.id}`} className="text-primary hover:underline font-medium text-xs">
-                    Open Chart &rarr;
+                    Open Terminal &rarr;
                   </Link>
-
                 </div>
               </div>
             </div>
           ))
         ) : (
           <div className="col-span-full text-center py-12 bg-surface border border-zinc-800 rounded-2xl text-zinc-500">
-            No tokens found. Be the first to launch one!
+            No launches found. Be the first to launch one!
           </div>
         )}
       </div>

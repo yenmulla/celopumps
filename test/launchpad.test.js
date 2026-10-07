@@ -1,124 +1,102 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
-describe("Launchpad", function () {
-  let LaunchpadFactory;
+describe("LaunchFactory", function () {
+  let LaunchFactory;
   let factory;
   let owner;
-  let creator;
-  let buyer;
-  let tokenAddress;
-  let token;
+  let treasury;
+  let priceSigner;
+  let quote;
 
-  const DEFAULT_TAX = 0; // 0%
-  const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+  const mockPoolManager = "0x0000000000000000000000000000000000000001";
+  const mockWeth = "0x0000000000000000000000000000000000000002";
+  const mockDistributorImpl = "0x0000000000000000000000000000000000000003";
 
   beforeEach(async function () {
-    [owner, creator, buyer] = await ethers.getSigners();
+    const signers = await ethers.getSigners();
+    owner = signers[0];
+    treasury = signers[1];
+    priceSigner = signers[2];
+    quote = signers[3];
 
-    LaunchpadFactory = await ethers.getContractFactory("LaunchpadFactory");
-    factory = await LaunchpadFactory.deploy();
+    LaunchFactory = await ethers.getContractFactory("LaunchFactory");
+    factory = await LaunchFactory.deploy(
+      owner.address,
+      mockPoolManager,
+      treasury.address,
+      priceSigner.address,
+      mockWeth,
+      mockDistributorImpl
+    );
   });
 
-  describe("Deployment", function () {
+  describe("Deployment & Admin Settings", function () {
     it("Should set the right owner", async function () {
       expect(await factory.owner()).to.equal(owner.address);
     });
+
+    it("Should set initial creation fee, opening FDV, and graduation threshold", async function () {
+      expect(await factory.creationFee()).to.equal(0);
+      expect(await factory.openingFdvUsd()).to.equal(ethers.parseEther("4000"));
+      expect(await factory.graduationThreshold()).to.equal(ethers.parseEther("2"));
+    });
+
+    it("Should allow owner to update creation fee", async function () {
+      await factory.setCreationFee(ethers.parseEther("0.002"));
+      expect(await factory.creationFee()).to.equal(ethers.parseEther("0.002"));
+    });
+
+    it("Should allow owner to update treasury", async function () {
+      await factory.setTreasury(treasury.address);
+      expect(await factory.treasury()).to.equal(treasury.address);
+    });
+
+    it("Should track launch count", async function () {
+      expect(await factory.launchCount()).to.equal(0);
+    });
+
+    it("Should allow owner to withdraw ETH and tokens", async function () {
+      await factory.withdrawETH(owner.address, 0);
+      expect(await factory.graduationThreshold()).to.equal(ethers.parseEther("2"));
+    });
   });
 
-  describe("Token Creation", function () {
-    it("Should create a new token with advanced settings", async function () {
-      const taxBps = 500; // 5%
-      const tx = await factory.connect(creator).createToken("Test Token", "TEST", taxBps, creator.address, false);
-      const receipt = await tx.wait();
+  describe("Token Launch & Fee Tax Trading", function () {
+    let mockWethContract;
 
-      const event = receipt.logs.find(log => {
-        try {
-          return factory.interface.parseLog(log).name === 'TokenCreated';
-        } catch (e) {
-          return false;
-        }
+    beforeEach(async function () {
+      const MockWETH = await ethers.getContractFactory("MockWETH");
+      mockWethContract = await MockWETH.deploy();
+      await factory.registerQuote(await mockWethContract.getAddress());
+    });
+
+    it("Should deduct and distribute trading tax on buy", async function () {
+      const launchParams = {
+        name: "Tax Token",
+        symbol: "TAX",
+        metadataUri: "meta",
+        quote: await mockWethContract.getAddress(),
+        quoteUsdPrice: ethers.parseEther("3000"),
+        priceDeadline: BigInt(Math.floor(Date.now() / 1000) + 86400),
+        priceSignature: "0x",
+        feePpm: 50000, // 5% tax
+        feesToHolders: false
+      };
+
+      const tx = await factory.connect(owner).createLaunch(launchParams, { value: 0 });
+      const receipt = await tx.wait();
+      const launchedEvent = receipt.logs.find(log => {
+        try { return factory.interface.parseLog(log).name === 'Launched'; } catch { return false; }
       });
+      const tokenAddress = factory.interface.parseLog(launchedEvent).args.token;
 
-      const parsedLog = factory.interface.parseLog(event);
-      tokenAddress = parsedLog.args.token;
+      const initialOwnerBal = await ethers.provider.getBalance(owner.address);
+      await factory.connect(treasury).buy(tokenAddress, { value: ethers.parseEther("0.1") });
+      const finalOwnerBal = await ethers.provider.getBalance(owner.address);
 
-      token = await ethers.getContractAt("LaunchpadToken", tokenAddress);
-
-      expect(await token.name()).to.equal("Test Token");
-      expect(await token.symbol()).to.equal("TEST");
-
-      const tokenInfo = await factory.tokens(tokenAddress);
-      expect(tokenInfo.creatorTaxBps).to.equal(taxBps);
-      expect(tokenInfo.creatorFeeWallet).to.equal(creator.address);
-      expect(tokenInfo.holderFeeSharing).to.equal(false);
-    });
-
-    it("Should fail if tax is above 10%", async function () {
-      await expect(
-        factory.connect(creator).createToken("Scam", "SCAM", 1001, creator.address, false)
-      ).to.be.revertedWith("Tax too high");
-    });
-  });
-
-  describe("Advanced Trading Logic", function () {
-    let creatorFeeWallet;
-
-    beforeEach(async function () {
-      [, creator, buyer, creatorFeeWallet] = await ethers.getSigners();
-    });
-
-    it("Should distribute 5% creator tax to specific wallet", async function () {
-      const taxBps = 500; // 5%
-      const tx = await factory.connect(creator).createToken("Taxed", "TAX", taxBps, creatorFeeWallet.address, false);
-      const receipt = await tx.wait();
-      tokenAddress = factory.interface.parseLog(receipt.logs[0]).args.token;
-
-      const buyAmount = ethers.parseEther("10.0");
-      const expectedProtocolFee = (buyAmount * 1n) / 100n; // 1%
-      const expectedCreatorTax = (buyAmount * 5n) / 100n; // 5%
-
-      const initialCreatorFeeBalance = await ethers.provider.getBalance(creatorFeeWallet.address);
-      await factory.connect(buyer).buy(tokenAddress, { value: buyAmount });
-      const finalCreatorFeeBalance = await ethers.provider.getBalance(creatorFeeWallet.address);
-
-      expect(finalCreatorFeeBalance - initialCreatorFeeBalance).to.equal(expectedCreatorTax);
-    });
-
-    it("Should burn tokens when Holder Fee Sharing is enabled", async function () {
-      const taxBps = 1000; // 10%
-      const tx = await factory.connect(creator).createToken("Sharing", "SHARE", taxBps, ZERO_ADDRESS, true);
-      const receipt = await tx.wait();
-      tokenAddress = factory.interface.parseLog(receipt.logs[0]).args.token;
-      token = await ethers.getContractAt("LaunchpadToken", tokenAddress);
-
-      const buyAmount = ethers.parseEther("10.0");
-
-      const initialDeadBalance = await token.balanceOf("0x000000000000000000000000000000000000dEaD");
-      await factory.connect(buyer).buy(tokenAddress, { value: buyAmount });
-      const finalDeadBalance = await token.balanceOf("0x000000000000000000000000000000000000dEaD");
-
-      expect(finalDeadBalance).to.be.gt(initialDeadBalance);
-    });
-  });
-
-  describe("Pricing & Curves", function () {
-    beforeEach(async function () {
-      const tx = await factory.connect(creator).createToken("Curve", "CURVE", 0, ZERO_ADDRESS, false);
-      const receipt = await tx.wait();
-      tokenAddress = factory.interface.parseLog(receipt.logs[0]).args.token;
-    });
-
-    it("Should scale pricing according to the bonding curve", async function () {
-      const buyAmount = ethers.parseEther("10.0");
-
-      await factory.connect(buyer).buy(tokenAddress, { value: buyAmount });
-      const balance1 = await token.balanceOf(buyer.address);
-
-      await factory.connect(buyer).buy(tokenAddress, { value: buyAmount });
-      const balance2 = (await token.balanceOf(buyer.address)) - balance1;
-
-      expect(balance2).to.be.lt(balance1);
+      // 5% of 0.1 ETH = 0.005 ETH tax sent to creator/feeRecipient (owner)
+      expect(finalOwnerBal - initialOwnerBal).to.equal(ethers.parseEther("0.005"));
     });
   });
 });

@@ -3,17 +3,16 @@
 import React from 'react';
 import { RainbowKitProvider, getDefaultConfig, darkTheme } from '@rainbow-me/rainbowkit';
 import { WagmiProvider } from 'wagmi';
-import { celo, celoAlfajores, optimism, arbitrum } from 'wagmi/chains';
+import { mainnet, sepolia, optimism, arbitrum, celo, celoAlfajores } from 'wagmi/chains';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import '@rainbow-me/rainbowkit/styles.css';
 
 const config = getDefaultConfig({
-  appName: 'CeloPump Launchpad',
+  appName: 'Stockpad Launchpad',
   projectId: process.env.NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID || '044601f652123329241917616d549d63',
-  chains: [celo, celoAlfajores, optimism, arbitrum],
+  chains: [mainnet, sepolia, optimism, arbitrum, celo, celoAlfajores],
   ssr: true,
 });
-
 
 const queryClient = new QueryClient();
 

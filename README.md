@@ -9,7 +9,7 @@ A decentralized, fair-launch token launchpad powered by bonding curves on **Celo
 - **Free Token Launch:** Create and launch tokens with 0 upfront creation fees.
 - **Fair Bonding Curve:** Automated market maker (AMM) bonding curve algorithm for instant liquidity, buying, and selling.
 - **Custom Creator Revenue:** Set up to 10% creator tax with custom creator fee wallet allocation or automated holder fee-sharing/burn mode.
-- **Automatic Graduation:** When real reserve threshold is met (e.g. 2,000 CELO on Celo or 1 ETH on L2s), the token automatically graduates to DEX liquidity.
+- **Automatic Graduation:** When real reserve threshold is met (e.g. 100 CELO on Celo or 1 ETH on L2s), the token automatically graduates to DEX liquidity.
 - **Multi-Chain Ready:** Deployed and configured for Celo, Optimism, and Arbitrum.
 - **Modern Web3 Interface:** Built with Next.js 14, Tailwind CSS, Wagmi v2, Viem, and RainbowKit.
 

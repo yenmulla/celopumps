@@ -1,14 +1,13 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useParams } from 'next/navigation';
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, useBalance, useChainId } from 'wagmi';
+import { useAccount, useReadContract, useWriteContract, useSendTransaction, useWaitForTransactionReceipt, useBalance, useChainId } from 'wagmi';
 import { formatEther, parseEther } from 'viem';
-import { LAUNCHPAD_FACTORY_ABI, getLaunchpadFactoryAddress, LAUNCHPAD_TOKEN_ABI } from '@/contracts';
+import { LAUNCH_FACTORY_ABI, LAUNCH_TOKEN_ABI, getLaunchFactoryAddress } from '@/contracts';
 
-import { ArrowLeft, Coins, TrendingUp, Users, ShieldAlert, Award, MessageSquare, Wallet, PieChart, Landmark, Bell, X } from 'lucide-react';
+import { ArrowLeft, Award, Wallet, PieChart, Landmark, Bell, X, ShieldCheck } from 'lucide-react';
 import Link from 'next/link';
-
 
 export default function TradingTerminalPage() {
   const { id } = useParams();
@@ -16,33 +15,41 @@ export default function TradingTerminalPage() {
   const { address } = useAccount();
   const chainId = useChainId();
 
-  // Determine native token name dynamically based on chainId (Celo, Optimism, Arbitrum)
   const { nativeSymbol, dexName } = useMemo(() => {
-    if (chainId === 10 || chainId === 42161) return { nativeSymbol: 'ETH', dexName: 'Uniswap' };
-    return { nativeSymbol: 'CELO', dexName: 'Ubeswap' };
+    if (chainId === 10 || chainId === 42161 || chainId === 11155111) return { nativeSymbol: 'ETH', dexName: 'Uniswap v4' };
+    return { nativeSymbol: 'CELO', dexName: 'Uniswap v4' };
   }, [chainId]);
 
+  const factoryAddress = useMemo(() => getLaunchFactoryAddress(chainId), [chainId]);
 
-
-  const factoryAddress = useMemo(() => getLaunchpadFactoryAddress(chainId), [chainId]);
-
-  // Fetch token details
-  const { data: tokenData, refetch: refetchToken } = useReadContract({
-    address: factoryAddress,
-    abi: LAUNCHPAD_FACTORY_ABI,
-    functionName: 'tokens',
-    args: [tokenAddress],
-  });
-
-  const { data: threshold } = useReadContract({
-    address: factoryAddress,
-    abi: LAUNCHPAD_FACTORY_ABI,
-    functionName: 'GRADUATION_THRESHOLD',
-  });
-
-  const { data: balance } = useReadContract({
+  // Fetch token metadata from LaunchToken contract
+  const { data: nameData } = useReadContract({
     address: tokenAddress,
-    abi: LAUNCHPAD_TOKEN_ABI,
+    abi: LAUNCH_TOKEN_ABI,
+    functionName: 'name',
+  });
+
+  const { data: symbolData } = useReadContract({
+    address: tokenAddress,
+    abi: LAUNCH_TOKEN_ABI,
+    functionName: 'symbol',
+  });
+
+  const { data: metadataData } = useReadContract({
+    address: tokenAddress,
+    abi: LAUNCH_TOKEN_ABI,
+    functionName: 'metadataUri',
+  });
+
+  const { data: creatorData } = useReadContract({
+    address: tokenAddress,
+    abi: LAUNCH_TOKEN_ABI,
+    functionName: 'creator',
+  });
+
+  const { data: balance, refetch: refetchBalance } = useReadContract({
+    address: tokenAddress,
+    abi: LAUNCH_TOKEN_ABI,
     functionName: 'balanceOf',
     args: [address as `0x${string}`],
   });
@@ -51,16 +58,64 @@ export default function TradingTerminalPage() {
     address: address,
   });
 
+  const { data: routerAddress } = useReadContract({
+    address: factoryAddress,
+    abi: LAUNCH_FACTORY_ABI,
+    functionName: 'router',
+  });
+
+  const targetSpender = useMemo(() => {
+    if (routerAddress && routerAddress !== '0x0000000000000000000000000000000000000000') {
+      return routerAddress as `0x${string}`;
+    }
+    return factoryAddress;
+  }, [routerAddress, factoryAddress]);
 
   const { data: allowance, refetch: refetchAllowance } = useReadContract({
     address: tokenAddress,
-    abi: LAUNCHPAD_TOKEN_ABI,
+    abi: LAUNCH_TOKEN_ABI,
     functionName: 'allowance',
-    args: [address as `0x${string}`, factoryAddress],
+    args: [address as `0x${string}`, targetSpender],
   });
 
+  const { data: realReservesData } = useReadContract({
+    address: factoryAddress,
+    abi: LAUNCH_FACTORY_ABI,
+    functionName: 'realReserves',
+    args: [tokenAddress],
+  });
 
-  const { writeContract, data: hash, isPending, reset } = useWriteContract();
+  const { data: isGraduatedData } = useReadContract({
+    address: factoryAddress,
+    abi: LAUNCH_FACTORY_ABI,
+    functionName: 'isGraduated',
+    args: [tokenAddress],
+  });
+
+  const { data: thresholdData } = useReadContract({
+    address: factoryAddress,
+    abi: LAUNCH_FACTORY_ABI,
+    functionName: 'graduationThreshold',
+  });
+
+  const graduationThresholdEth = thresholdData
+    ? parseFloat(formatEther(thresholdData as bigint))
+    : (chainId === 1 ? 2.0 : 0.2);
+
+  const realReservesEth = realReservesData
+    ? parseFloat(formatEther(realReservesData as bigint))
+    : 0;
+
+  const isGraduated = Boolean(isGraduatedData);
+  const graduationProgress = isGraduated
+    ? 100
+    : Math.min(100, (realReservesEth / graduationThresholdEth) * 100);
+
+  const { writeContract, data: writeHash, isPending: isWritePending, reset } = useWriteContract();
+  const { sendTransaction, data: sendHash, isPending: isSendPending } = useSendTransaction();
+
+  const hash = writeHash || sendHash;
+  const isPending = isWritePending || isSendPending;
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash });
 
   const [tradeMode, setTradeMode] = useState<'buy' | 'sell'>('buy');
@@ -68,14 +123,43 @@ export default function TradingTerminalPage() {
   const [priceHistory, setPriceHistory] = useState<number[]>([]);
   const [notification, setNotification] = useState<{ show: boolean; msg: string; type: 'buy' | 'sell' }>({ show: false, msg: '', type: 'buy' });
 
-  // Refetch data on success
-  React.useEffect(() => {
+  const tokenInfo = useMemo(() => {
+    const name = (nameData as string) || 'Token';
+    const symbol = (symbolData as string) || 'TKN';
+    const rawMeta = (metadataData as string) || '';
+    const creatorAddr = (creatorData as string) || tokenAddress;
+
+    let description = 'Launchpad Token on Uniswap v4 Hook Pool';
+    let logoUrl = '';
+    if (rawMeta) {
+      try {
+        const parsed = JSON.parse(rawMeta);
+        description = parsed.description || rawMeta;
+        logoUrl = parsed.imageUrl || '';
+      } catch {
+        description = rawMeta;
+      }
+    }
+
+    return {
+      name,
+      symbol,
+      description,
+      logoUrl,
+      virtualMarketCap: 4000,
+      liquidity: 4000,
+      progress: 100,
+      holderCount: 1,
+      creator: `${creatorAddr.substring(0, 6)}...${creatorAddr.substring(38)}`,
+    };
+  }, [nameData, symbolData, metadataData, creatorData, tokenAddress]);
+
+  useEffect(() => {
     if (isSuccess) {
-      refetchToken();
+      refetchBalance();
       refetchAllowance();
       refetchCeloBalance();
 
-      // Trigger top alert popup
       if (tokenInfo) {
         const modeLabel = tradeMode === 'buy' ? 'Bought' : 'Sold';
         setNotification({
@@ -84,7 +168,6 @@ export default function TradingTerminalPage() {
           type: tradeMode
         });
 
-        // Auto-dismiss after 5 seconds
         const timer = setTimeout(() => {
           setNotification(prev => ({ ...prev, show: false }));
         }, 5000);
@@ -93,32 +176,10 @@ export default function TradingTerminalPage() {
 
       setAmount('');
     }
-  }, [isSuccess, refetchToken, refetchAllowance, refetchCeloBalance]);
+  }, [isSuccess, refetchBalance, refetchAllowance, refetchCeloBalance, tokenInfo, tradeMode, amount]);
 
-
-
-  const tokenInfo = useMemo(() => {
-    if (!tokenData) return null;
-    const data = tokenData as any;
-    const realCelo = parseFloat(formatEther(data[4] || BigInt(0)));
-    const defaultThreshold = (chainId === 10 || chainId === 42161) ? "1000000000000000000" : "2000000000000000000000";
-    const gradThreshold = parseFloat(formatEther(threshold || BigInt(defaultThreshold)));
-
-    return {
-      name: data[10],
-      symbol: data[11],
-      description: data[12],
-      virtualMarketCap: realCelo,
-      liquidity: realCelo,
-      progress: Math.min(100, (realCelo / gradThreshold) * 100),
-      holderCount: 0, // Contract doesn't store this, would need an indexer
-      creator: `${data[1].substring(0, 5)}...${data[1].substring(38)}`,
-    };
-  }, [tokenData, threshold]);
-
-
-  // Chart Live Logic
-  React.useEffect(() => {
+  // Chart Live Simulation
+  useEffect(() => {
     if (tokenInfo && priceHistory.length === 0) {
       const base = tokenInfo.virtualMarketCap || 1;
       const initialPoints = Array.from({ length: 40 }, (_, i) => {
@@ -129,7 +190,7 @@ export default function TradingTerminalPage() {
     }
   }, [tokenInfo, priceHistory.length]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!tokenInfo) return;
     const interval = setInterval(() => {
       setPriceHistory((current) => {
@@ -159,40 +220,36 @@ export default function TradingTerminalPage() {
     return { linePath, areaPath, latestPrice, priceChange };
   }, [priceHistory]);
 
-  // Simulated User Performance Data
   const userPerformance = useMemo(() => {
     if (!balance || !tokenInfo) return { fees: 0, roi: 0, value: 0 };
     const bal = parseFloat(formatEther(balance));
     if (bal === 0) return { fees: 0, roi: 0, value: 0 };
 
-    // Simulation: 0.5% of position value earned as trading fee dividends in native chain token
     const value = bal * svgPathData.latestPrice;
     const fees = value * 0.0056;
-    const roi = (svgPathData.priceChange * 0.8) + 2.5; // Correlated to chart + small alpha
+    const roi = (svgPathData.priceChange * 0.8) + 2.5;
     return { fees, roi, value };
   }, [balance, tokenInfo, svgPathData.latestPrice, svgPathData.priceChange]);
-
-
 
   const handleTrade = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!amount) return;
 
+    const amt = parseEther(amount);
+
     if (tradeMode === 'buy') {
       writeContract({
         address: factoryAddress,
-        abi: LAUNCHPAD_FACTORY_ABI,
+        abi: LAUNCH_FACTORY_ABI,
         functionName: 'buy',
         args: [tokenAddress],
-        value: parseEther(amount),
+        value: amt,
       });
     } else {
-      // Check allowance
-      const amt = parseEther(amount);
       if ((allowance || 0n) < amt) {
         writeContract({
           address: tokenAddress,
-          abi: LAUNCHPAD_TOKEN_ABI,
+          abi: LAUNCH_TOKEN_ABI,
           functionName: 'approve',
           args: [factoryAddress, amt],
         });
@@ -201,19 +258,18 @@ export default function TradingTerminalPage() {
 
       writeContract({
         address: factoryAddress,
-        abi: LAUNCHPAD_FACTORY_ABI,
+        abi: LAUNCH_FACTORY_ABI,
         functionName: 'sell',
         args: [tokenAddress, amt],
       });
     }
-
   };
 
   if (!tokenInfo) return <div className="p-12 text-center">Loading token data...</div>;
 
   return (
     <div className="space-y-6 relative">
-      {/* Top Floating Notification Popup Alert */}
+      {/* Floating Alert */}
       {notification.show && (
         <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 w-full max-w-md px-4 animate-in fade-in slide-in-from-top-4 duration-300">
           <div className={`p-4 rounded-xl shadow-2xl border flex items-center justify-between gap-3 text-sm font-semibold backdrop-blur-md ${
@@ -235,19 +291,18 @@ export default function TradingTerminalPage() {
         </div>
       )}
 
-      {/* Header back navigation bar */}
-
+      {/* Header */}
       <div className="flex items-center justify-between">
         <Link href="/" className="inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-primary transition-colors">
           <ArrowLeft className="h-4 w-4" /> Back to Dashboard
         </Link>
-        <span className="text-xs text-zinc-500 font-mono">Pool ID: {id}</span>
+        <span className="text-xs text-zinc-500 font-mono">Token: {id}</span>
       </div>
 
-      {/* Main split dashboard arrangement */}
+      {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-        {/* Left column / Centralized chart and core specifications */}
+        {/* Left Column */}
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-surface border border-zinc-800 rounded-2xl p-6">
             <div className="flex justify-between items-start mb-4">
@@ -258,18 +313,18 @@ export default function TradingTerminalPage() {
                 <p className="text-xs text-zinc-500 mt-1">Deployed by {tokenInfo.creator}</p>
               </div>
               <div className="text-right">
-                <p className="text-xs text-zinc-400 uppercase font-semibold">Real {nativeSymbol} Reserves</p>
-                <p className="text-xl font-bold text-secondary">{tokenInfo.virtualMarketCap.toFixed(4)} {nativeSymbol}</p>
+                <p className="text-xs text-zinc-400 uppercase font-semibold">Opening FDV</p>
+                <p className="text-xl font-bold text-secondary">${tokenInfo.virtualMarketCap.toLocaleString()} USD</p>
               </div>
             </div>
 
-            {/* Simulated Live Analytics Graphic/Chart panel */}
+            {/* Live Chart */}
             <div className="w-full h-80 bg-background rounded-xl border border-zinc-900 relative overflow-hidden flex flex-col justify-between p-4">
               <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:16px_16px] opacity-40" />
 
               <div className="flex justify-between text-[10px] text-zinc-600 z-10">
                 <span className="flex items-center gap-2">
-                  Price ({nativeSymbol}): <span className="font-mono text-white font-bold">{svgPathData.latestPrice.toFixed(6)}</span>
+                  Price: <span className="font-mono text-white font-bold">${svgPathData.latestPrice.toFixed(4)}</span>
                   <span className={`font-mono font-semibold ${svgPathData.priceChange >= 0 ? 'text-primary' : 'text-red-500'}`}>
                     {svgPathData.priceChange >= 0 ? '+' : ''}{svgPathData.priceChange.toFixed(2)}%
                   </span>
@@ -319,7 +374,7 @@ export default function TradingTerminalPage() {
             </div>
           </div>
 
-              <div className="bg-surface border border-zinc-800 rounded-2xl p-6 space-y-4">
+          <div className="bg-surface border border-zinc-800 rounded-2xl p-6 space-y-4">
             <h3 className="font-bold text-white text-sm uppercase tracking-wider flex items-center gap-2">
               <Award className="h-4 w-4 text-primary" /> Token Overview & Vision
             </h3>
@@ -328,31 +383,49 @@ export default function TradingTerminalPage() {
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-2">
               <div className="bg-background p-3 rounded-xl border border-zinc-900 text-center">
-                <p className="text-[10px] text-zinc-500 font-semibold uppercase">Total Liquidity</p>
-                <p className="text-sm font-bold text-white">{tokenInfo.liquidity.toFixed(2)} {nativeSymbol}</p>
+                <p className="text-[10px] text-zinc-500 font-semibold uppercase">Pool Type</p>
+                <p className="text-sm font-bold text-white">
+                  {chainId === 1 ? 'Uniswap V3 Mainnet' : 'Uniswap v4 Hook'}
+                </p>
               </div>
               <div className="bg-background p-3 rounded-xl border border-zinc-900 text-center">
-                <p className="text-[10px] text-zinc-500 font-semibold uppercase">Holders</p>
-                <p className="text-sm font-bold text-white">N/A</p>
+                <p className="text-[10px] text-zinc-500 font-semibold uppercase">Total Supply</p>
+                <p className="text-sm font-bold text-white">1B {tokenInfo.symbol}</p>
               </div>
               <div className="bg-background p-3 rounded-xl border border-zinc-900 text-center">
-                <p className="text-[10px] text-zinc-500 font-semibold uppercase">Network ID</p>
+                <p className="text-[10px] text-zinc-500 font-semibold uppercase">Chain ID</p>
                 <p className="text-sm font-bold text-primary">{chainId}</p>
               </div>
               <div className="bg-background p-3 rounded-xl border border-zinc-900 text-center">
                 <p className="text-[10px] text-zinc-500 font-semibold uppercase">Status</p>
-                <p className="text-sm font-bold text-secondary">Fair Launch</p>
+                <p className={`text-sm font-bold ${isGraduated ? 'text-secondary' : 'text-primary'}`}>
+                  {isGraduated ? 'Graduated' : 'Active Curve'}
+                </p>
+              </div>
+            </div>
+
+            {/* Graduation Progress Banner */}
+            <div className="bg-background p-4 rounded-xl border border-zinc-900 space-y-2">
+              <div className="flex justify-between items-center text-xs font-semibold">
+                <span className="text-zinc-400">Graduation Progress ({realReservesEth.toFixed(3)} / {graduationThresholdEth.toFixed(2)} {nativeSymbol})</span>
+                <span className={isGraduated ? 'text-secondary font-bold' : 'text-primary'}>
+                  {isGraduated ? 'Graduated to Uniswap' : `${graduationProgress.toFixed(1)}%`}
+                </span>
+              </div>
+              <div className="w-full bg-zinc-900 h-2.5 rounded-full overflow-hidden border border-zinc-800">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${isGraduated ? 'bg-secondary' : 'bg-gradient-to-r from-primary to-secondary'}`}
+                  style={{ width: `${graduationProgress}%` }}
+                />
               </div>
             </div>
           </div>
-
         </div>
 
-        {/* Right column / Live Interaction Trading Desk Panel */}
+        {/* Right Column / Trading Terminal */}
         <div className="space-y-6">
           <div className="bg-surface border border-zinc-800 rounded-2xl p-6">
-
-            {/* Buy/Sell Tabs */}
+            {/* Tabs */}
             <div className="grid grid-cols-2 bg-background p-1 rounded-xl mb-6 border border-zinc-900">
               <button
                 onClick={() => { setTradeMode('buy'); reset(); }}
@@ -376,7 +449,7 @@ export default function TradingTerminalPage() {
               </button>
             </div>
 
-            {/* Input Form Fields */}
+            {/* Trade Form */}
             <form onSubmit={handleTrade} className="space-y-4">
               <div className="space-y-2">
                 <div className="flex justify-between items-center text-xs font-medium">
@@ -387,7 +460,6 @@ export default function TradingTerminalPage() {
                       : (balance ? parseFloat(formatEther(balance)).toFixed(4) : '0.0000')
                     } {tradeMode === 'buy' ? nativeSymbol : tokenInfo.symbol}
                   </span>
-
                 </div>
                 <div className="relative">
                   <input
@@ -405,16 +477,13 @@ export default function TradingTerminalPage() {
                 </div>
               </div>
 
-
-              {/* Calculated Outputs Preview */}
               <div className="bg-background p-3 rounded-xl border border-zinc-900 text-xs space-y-2">
                 <div className="flex justify-between text-zinc-400">
-                  <span>Slippage Tolerance:</span>
-                  <span className="text-primary font-medium">1.0%</span>
+                  <span>Routing:</span>
+                  <span className="text-primary font-medium">Uniswap v4 Hook Router</span>
                 </div>
               </div>
 
-              {/* Submit Execution Action */}
               <button
                 type="submit"
                 disabled={isPending || isConfirming}
@@ -435,7 +504,6 @@ export default function TradingTerminalPage() {
               </button>
             </form>
 
-            {/* Notification alert states */}
             {isSuccess && (
               <div className="mt-4 p-3 bg-zinc-900/80 border border-zinc-800 rounded-xl text-center space-y-1">
                 <p className="text-xs text-primary font-bold">Transaction Confirmed!</p>
@@ -444,7 +512,7 @@ export default function TradingTerminalPage() {
             )}
           </div>
 
-          {/* User Position & ROI Card */}
+          {/* User Position */}
           <div className="bg-surface border border-zinc-800 rounded-2xl p-6 space-y-5">
             <h3 className="font-bold text-white text-xs uppercase tracking-wider flex items-center gap-2">
               <Wallet className="h-4 w-4 text-primary" /> Your Position
@@ -454,10 +522,11 @@ export default function TradingTerminalPage() {
               <div className="bg-background p-4 rounded-xl border border-zinc-900">
                 <div className="flex items-center gap-2 mb-1">
                   <Landmark className="h-3.5 w-3.5 text-zinc-500" />
-                  <p className="text-[10px] text-zinc-500 font-bold uppercase">Fees Earned</p>
+                  <p className="text-[10px] text-zinc-500 font-bold uppercase">Holdings</p>
                 </div>
-                <p className="text-lg font-black text-white">{userPerformance.fees.toFixed(4)} <span className="text-[10px] text-zinc-500">{nativeSymbol}</span></p>
-                <p className="text-[10px] text-primary font-medium mt-1">Auto-compounding</p>
+                <p className="text-lg font-black text-white">
+                  {balance ? parseFloat(formatEther(balance)).toFixed(2) : '0.00'} <span className="text-[10px] text-zinc-500">{tokenInfo.symbol}</span>
+                </p>
               </div>
 
               <div className="bg-background p-4 rounded-xl border border-zinc-900">
@@ -468,43 +537,25 @@ export default function TradingTerminalPage() {
                 <p className={`text-lg font-black ${userPerformance.roi >= 0 ? 'text-primary' : 'text-red-500'}`}>
                   {userPerformance.roi >= 0 ? '+' : ''}{userPerformance.roi.toFixed(2)}%
                 </p>
-                <p className="text-[10px] text-zinc-500 mt-1">Current PnL</p>
-              </div>
-            </div>
-
-            <div className="pt-2">
-              <div className="flex justify-between text-[11px] mb-2">
-                <span className="text-zinc-500">Net Position Value</span>
-                <span className="text-white font-mono">{userPerformance.value.toFixed(4)} {nativeSymbol}</span>
-              </div>
-
-              <div className="w-full bg-zinc-900 h-1.5 rounded-full overflow-hidden">
-                <div className="bg-primary h-full w-2/3 rounded-full opacity-50" />
               </div>
             </div>
           </div>
 
-          {/* Bonding curve status metrics box */}
+          {/* Hook Pool Info */}
           <div className="bg-surface border border-zinc-800 rounded-2xl p-5 space-y-3">
             <div className="flex justify-between items-center text-xs">
-              <span className="text-zinc-400 font-medium">Bonding Curve Target:</span>
-              <span className="font-bold text-primary">{tokenInfo.progress.toFixed(1)}%</span>
+              <span className="text-zinc-400 font-medium">Hook Pool Liquidity:</span>
+              <span className="font-bold text-primary">Active</span>
             </div>
             <div className="w-full bg-background h-2.5 rounded-full overflow-hidden border border-zinc-900">
-              <div
-                className="bg-gradient-to-r from-primary to-secondary h-full rounded-full transition-all"
-                style={{ width: `${tokenInfo.progress}%` }}
-              />
+              <div className="bg-gradient-to-r from-primary to-secondary h-full w-full rounded-full" />
             </div>
             <div className="flex gap-2 text-[11px] text-zinc-400 bg-background/50 border border-zinc-900 p-3 rounded-xl">
-              <ShieldAlert className="h-4 w-4 text-secondary shrink-0" />
-              <span>When funding hits 100%, the curve graduates to {dexName} automatically.</span>
+              <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
+              <span>Liquidity is managed via Stockpad Uniswap v4 Launch Hook with built-in fee distribution.</span>
             </div>
-
           </div>
-
         </div>
-
       </div>
     </div>
   );

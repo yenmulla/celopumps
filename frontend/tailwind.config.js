@@ -8,10 +8,11 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        background: "#0a0b0d",
-        surface: "#14161a",
-        primary: "#35d07f", // Celo Green
-        secondary: "#fbcc5c", // Celo Gold
+        background: "#08090c",
+        surface: "#111319",
+        primary: "#6366f1", // Electric Indigo / Ethereum Blue
+        secondary: "#ff007a", // Uniswap Pink / Pink-Magenta
+        accent: "#10b981", // Emerald Green
       },
     },
   },
